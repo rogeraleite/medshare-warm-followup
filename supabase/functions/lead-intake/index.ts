@@ -1,37 +1,45 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2'
+import { extractFirstName, renderTemplate, type Lead } from '../_shared/templates.ts'
 
 const SEQUENCE_DELAYS_DAYS = [0, 1, 3, 7, 14]
 
-/**
- * Normalize phone to E.164 without the leading +
- * - If starts with '+', strip the '+' and use digits as-is (already has country code)
- * - Otherwise prepend '55' (Brazilian number without country code)
- */
 function normalizePhone(raw: string): string {
   const trimmed = raw.trim()
   if (trimmed.startsWith('+')) return trimmed.slice(1).replace(/\D/g, '')
-  return '55' + trimmed.replace(/\D/g, '')
+  return trimmed.replace(/\D/g, '')
 }
 
-function extractFirstName(fullName: string): string {
-  return fullName.trim().split(' ')[0]
+async function sendWhatsAppText(phone: string, text: string): Promise<void> {
+  const url = `${Deno.env.get('ZAPSTER_API_URL')}/wa/messages`
+  const body = {
+    recipient: phone,
+    text,
+    instance_id: Deno.env.get('ZAPSTER_INSTANCE_ID'),
+    link_preview: true,
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${Deno.env.get('ZAPSTER_TOKEN')}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  const resText = await res.text()
+  console.log(`Zapster response ${res.status}:`, resText)
 }
 
-/**
- * Parse comma-separated lead data: nome, whatsapp, role, volume, problem
- * The problems field may contain commas, so we split on the first 4 commas only.
- */
-function parseLeadPayload(raw: string): Record<string, string> {
-  const parts = raw.split(',')
-  const name = parts[0]?.trim() ?? ''
-  const phone = parts[1]?.trim() ?? ''
-  const role = parts[2]?.trim() ?? ''
-  const procedures_per_month = parts[3]?.trim() ?? ''
-  const problems = parts.slice(4).join(',').trim() // rejoin remaining (problems may have commas)
-  return { name, phone, role, procedures_per_month, problems }
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 }
 
 Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: CORS_HEADERS })
+  }
+
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 })
   }
@@ -44,17 +52,16 @@ Deno.serve(async (req) => {
     try {
       body = await req.json()
     } catch {
-      return new Response('Invalid JSON body', { status: 400 })
+      return new Response('Invalid JSON body', { status: 400, headers: CORS_HEADERS })
     }
     ;({ name, phone, role, procedures_per_month, problems } = body)
+    console.log('Raw payload:', JSON.stringify(body))
   } else {
-    // Plain text CSV: nome, whatsapp, role, volume, problem
-    const text = await req.text()
-    ;({ name, phone, role, procedures_per_month, problems } = parseLeadPayload(text))
+    return new Response('Content-Type must be application/json', { status: 415, headers: CORS_HEADERS })
   }
 
   if (!name || !phone) {
-    return new Response('Missing required fields: name, phone', { status: 400 })
+    return new Response('Missing required fields: name, phone', { status: 400, headers: CORS_HEADERS })
   }
 
   const supabase = createClient(
@@ -64,63 +71,100 @@ Deno.serve(async (req) => {
 
   const normalizedPhone = normalizePhone(phone)
 
-  // Upsert lead (re-submission by same phone resets status to active)
+  // Check if lead already exists
+  const { data: existing } = await supabase
+    .from('leads')
+    .select('id')
+    .eq('phone', normalizedPhone)
+    .single()
+
+  const isReturning = !!existing
+
   const { data: lead, error: leadError } = await supabase
     .from('leads')
     .upsert(
       {
         name,
         phone: normalizedPhone,
-        role: role ?? null,
-        procedures_per_month: procedures_per_month ?? null,
-        problems: problems ?? null,
+        role: role || null,
+        procedures_per_month: procedures_per_month || null,
+        problems: problems || null,
         status: 'active',
       },
       { onConflict: 'phone', ignoreDuplicates: false }
     )
-    .select('id')
+    .select('id, name, phone, role, procedures_per_month, problems')
     .single()
 
   if (leadError || !lead) {
     console.error('Error upserting lead:', leadError)
-    return new Response('Failed to save lead', { status: 500 })
+    return new Response('Failed to save lead', { status: 500, headers: CORS_HEADERS })
   }
 
-  // Remove any existing pending messages before rescheduling
-  await supabase
-    .from('sequence_messages')
-    .delete()
-    .eq('lead_id', lead.id)
-    .eq('status', 'pending')
+  // Remove ALL existing messages and approvals (including sent) to avoid unique constraint on re-registration
+  await supabase.from('pending_approvals').delete().eq('lead_id', lead.id)
+  await supabase.from('sequence_messages').delete().eq('lead_id', lead.id)
 
-  // Schedule all 5 messages
   const now = new Date()
-  const messages = SEQUENCE_DELAYS_DAYS.map((delayDays, step) => {
+
+  // Step 1: awaiting_approval (first contact, held until owner approves)
+  const { data: step1, error: step1Error } = await supabase
+    .from('sequence_messages')
+    .insert({ lead_id: lead.id, step: 1, scheduled_at: now.toISOString(), status: 'awaiting_approval' })
+    .select('id')
+    .single()
+
+  if (step1Error || !step1) {
+    console.error('Error creating step 1:', step1Error)
+    return new Response('Failed to schedule step 1', { status: 500, headers: CORS_HEADERS })
+  }
+
+  // Steps 2-5: scheduled normally
+  const followups = SEQUENCE_DELAYS_DAYS.slice(1).map((delayDays, i) => {
     const scheduledAt = new Date(now)
     scheduledAt.setDate(scheduledAt.getDate() + delayDays)
-    return {
-      lead_id: lead.id,
-      step,
-      scheduled_at: scheduledAt.toISOString(),
-      status: 'pending',
-    }
+    return { lead_id: lead.id, step: i + 2, scheduled_at: scheduledAt.toISOString(), status: 'pending' }
   })
 
-  const { error: msgError } = await supabase
-    .from('sequence_messages')
-    .insert(messages)
+  await supabase.from('sequence_messages').insert(followups)
 
-  if (msgError) {
-    console.error('Error scheduling messages:', msgError)
-    return new Response('Failed to schedule messages', { status: 500 })
-  }
+  // Generate suggested step 1 message
+  const { data: template } = await supabase
+    .from('message_templates')
+    .select('body')
+    .eq('step', 1)
+    .single()
 
-  console.log(
-    `Lead ${extractFirstName(name)} (${normalizedPhone}) registered. ${messages.length} messages scheduled.`
-  )
+  const suggestedMessage = template ? renderTemplate(template.body, lead as Lead) : ''
+
+  // Store pending approval
+  await supabase.from('pending_approvals').insert({
+    sequence_message_id: step1.id,
+    lead_id: lead.id,
+    suggested_message: suggestedMessage,
+  })
+
+  // Notify owner
+  const ownerPhone = Deno.env.get('OWNER_PHONE')!
+  const notification =
+    (isReturning ? `*Lead voltou ao formulario!* 🔄\n\n` : `*Novo Lead MedShare!* 🎯\n\n`) +
+    `*Nome:* ${lead.name}\n` +
+    `*WhatsApp:* +${normalizedPhone}\n` +
+    `*Cargo:* ${lead.role ?? 'nao informado'}\n` +
+    `*Volume:* ${lead.procedures_per_month ?? 'nao informado'}\n` +
+    `*Problemas:* ${lead.problems ?? 'nao informado'}\n\n` +
+    `*Mensagem sugerida:*\n` +
+    `-----------------\n` +
+    `${suggestedMessage}\n` +
+    `-----------------\n\n` +
+    `Responda *sim* para enviar essa mensagem, ou escreva outra mensagem para enviar no lugar.`
+
+  await sendWhatsAppText(ownerPhone, notification)
+
+  console.log(`Lead ${extractFirstName(lead.name)} (${normalizedPhone}) registered. Owner notified for approval.`)
 
   return new Response(
     JSON.stringify({ success: true, lead_id: lead.id }),
-    { headers: { 'Content-Type': 'application/json' } }
+    { headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } }
   )
 })

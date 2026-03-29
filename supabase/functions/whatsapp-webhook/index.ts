@@ -8,19 +8,18 @@ const SEQUENCE_DELAYS_DAYS = [0, 1, 3, 7, 14]
 
 function normalizePhone(raw: string): string {
   const trimmed = raw.trim()
-  if (trimmed.startsWith('+')) return trimmed.slice(1).replace(/\D/g, '')
-  return trimmed.replace(/\D/g, '')
+  let digits = trimmed.startsWith('+') ? trimmed.slice(1).replace(/\D/g, '') : trimmed.replace(/\D/g, '')
+  // Brazilian mobile: 55 + 2-digit area code + 8 digits = 12 digits -> add 9th digit
+  if (digits.startsWith('55') && digits.length === 12) {
+    digits = digits.slice(0, 4) + '9' + digits.slice(4)
+  }
+  return digits
 }
 
-function normalizeLeadPhone(raw: string): string {
-  const trimmed = raw.trim()
-  if (trimmed.startsWith('+')) return trimmed.slice(1).replace(/\D/g, '')
-  return '55' + trimmed.replace(/\D/g, '')
-}
 
 // ─── Zapster send ─────────────────────────────────────────────────────────────
 
-async function sendWhatsAppText(phone: string, text: string): Promise<void> {
+async function sendWhatsAppText(phone: string, text: string): Promise<{ ok: boolean; status: number; body: string }> {
   const url = `${Deno.env.get('ZAPSTER_API_URL')}/wa/messages`
   const body = {
     recipient: phone,
@@ -39,6 +38,7 @@ async function sendWhatsAppText(phone: string, text: string): Promise<void> {
   })
   const resText = await res.text()
   console.log(`Zapster response ${res.status}:`, resText)
+  return { ok: res.ok, status: res.status, body: resText }
 }
 
 // ─── CSV parser ───────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ async function registerLead(
     return
   }
 
-  const normalizedPhone = normalizeLeadPhone(phone)
+  const normalizedPhone = normalizePhone(phone)
 
   const { data: lead, error: leadError } = await supabase
     .from('leads')
@@ -83,48 +83,45 @@ async function registerLead(
     return
   }
 
-  // Remove existing pending/approval messages
-  await supabase
-    .from('sequence_messages')
-    .delete()
-    .eq('lead_id', lead.id)
-    .in('status', ['pending', 'awaiting_approval', 'awaiting_confirm'])
+  // Remove ALL existing messages and approvals to avoid unique constraint on re-registration
+  await supabase.from('pending_approvals').delete().eq('lead_id', lead.id)
+  await supabase.from('sequence_messages').delete().eq('lead_id', lead.id)
 
   const now = new Date()
 
-  // Step 0: awaiting_approval (held until owner approves)
-  const { data: step0, error: step0Error } = await supabase
+  // Step 1: awaiting_approval (first contact, held until owner approves)
+  const { data: step1, error: step1Error } = await supabase
     .from('sequence_messages')
-    .insert({ lead_id: lead.id, step: 0, scheduled_at: now.toISOString(), status: 'awaiting_approval' })
+    .insert({ lead_id: lead.id, step: 1, scheduled_at: now.toISOString(), status: 'awaiting_approval' })
     .select('id')
     .single()
 
-  if (step0Error || !step0) {
-    console.error('Error creating step 0:', step0Error)
+  if (step1Error || !step1) {
+    console.error('Error creating step 1:', step1Error)
     return
   }
 
-  // Steps 1-4: scheduled normally
+  // Steps 2-5: scheduled normally
   const followups = SEQUENCE_DELAYS_DAYS.slice(1).map((delayDays, i) => {
     const scheduledAt = new Date(now)
     scheduledAt.setDate(scheduledAt.getDate() + delayDays)
-    return { lead_id: lead.id, step: i + 1, scheduled_at: scheduledAt.toISOString(), status: 'pending' }
+    return { lead_id: lead.id, step: i + 2, scheduled_at: scheduledAt.toISOString(), status: 'pending' }
   })
 
   await supabase.from('sequence_messages').insert(followups)
 
-  // Generate suggested step 0 message
+  // Generate suggested step 1 message
   const { data: template } = await supabase
     .from('message_templates')
     .select('body')
-    .eq('step', 0)
+    .eq('step', 1)
     .single()
 
   const suggestedMessage = template ? renderTemplate(template.body, lead as Lead) : ''
 
   // Store pending approval
   await supabase.from('pending_approvals').insert({
-    sequence_message_id: step0.id,
+    sequence_message_id: step1.id,
     lead_id: lead.id,
     suggested_message: suggestedMessage,
   })
@@ -142,7 +139,7 @@ async function registerLead(
     `─────────────────\n` +
     `${suggestedMessage}\n` +
     `─────────────────\n\n` +
-    `Responda *sim* para enviar essa mensagem, ou escreva a mensagem que prefere enviar no lugar.`
+    `Responda *sim* para enviar essa mensagem, ou escreva outra mensagem para enviar no lugar.`
 
   await sendWhatsAppText(ownerPhone, notification)
 
@@ -157,98 +154,54 @@ async function handleOwnerReply(
 ): Promise<void> {
   const ownerPhone = Deno.env.get('OWNER_PHONE')!
 
-  // Find oldest pending approval (awaiting_approval or awaiting_confirm)
+  // Find oldest pending approval
   const { data: approval } = await supabase
     .from('pending_approvals')
-    .select(`
-      id,
-      suggested_message,
-      final_message,
-      lead_id,
-      sequence_message_id,
-      sequence_messages!inner(status),
-      leads!inner(name, phone)
-    `)
-    .in('sequence_messages.status', ['awaiting_approval', 'awaiting_confirm'])
+    .select('id, suggested_message, sequence_message_id, leads!inner(name, phone)')
     .order('created_at', { ascending: true })
     .limit(1)
     .single()
 
-  if (!approval) {
-    // No pending approval — could be a lead reply, handled elsewhere
-    return
-  }
+  if (!approval) return
 
-  const seqStatus = (approval.sequence_messages as { status: string }).status
+  // Verify sequence message is still awaiting approval
+  const { data: seqMsg } = await supabase
+    .from('sequence_messages')
+    .select('status')
+    .eq('id', approval.sequence_message_id)
+    .single()
+
+  if (!seqMsg || seqMsg.status !== 'awaiting_approval') return
+
   const lead = approval.leads as { name: string; phone: string }
   const firstName = extractFirstName(lead.name)
 
-  if (seqStatus === 'awaiting_approval') {
-    // First reply: "sim" uses suggested, anything else is the custom message
-    const contentToSend = replyText.trim().toLowerCase() === 'sim'
-      ? approval.suggested_message
-      : replyText.trim()
+  // "sim" uses suggested message, anything else is sent as-is
+  const contentToSend = replyText.trim().toLowerCase() === 'sim'
+    ? approval.suggested_message
+    : replyText.trim()
 
-    // Store final message and advance state
-    await supabase
-      .from('pending_approvals')
-      .update({ final_message: contentToSend })
-      .eq('id', approval.id)
+  // Send to lead
+  const sendResult = await sendWhatsAppText(lead.phone, contentToSend)
 
-    await supabase
-      .from('sequence_messages')
-      .update({ status: 'awaiting_confirm' })
-      .eq('id', approval.sequence_message_id)
-
-    // Send confirmation to owner
-    const confirmation =
-      `*Confirmação de envio* ✅\n\n` +
-      `*Para:* ${lead.name} (+${lead.phone})\n\n` +
-      `*Mensagem que será enviada:*\n` +
-      `─────────────────\n` +
-      `${contentToSend}\n` +
-      `─────────────────\n\n` +
-      `Responda *sim* para confirmar e enviar.`
-
-    await sendWhatsAppText(ownerPhone, confirmation)
-    console.log(`Owner provided content for ${firstName}. Awaiting final confirmation.`)
-
-  } else if (seqStatus === 'awaiting_confirm') {
-    if (replyText.trim().toLowerCase() === 'sim') {
-      // Send to lead
-      await sendWhatsAppText(lead.phone, approval.final_message!)
-
-      // Mark as sent
-      await supabase
-        .from('sequence_messages')
-        .update({ status: 'sent', sent_at: new Date().toISOString() })
-        .eq('id', approval.sequence_message_id)
-
-      // Clean up approval
-      await supabase.from('pending_approvals').delete().eq('id', approval.id)
-
-      await sendWhatsAppText(ownerPhone, `Mensagem enviada para *${lead.name}* com sucesso! 🚀`)
-      console.log(`Step 0 sent to ${firstName} (${lead.phone}) after owner approval.`)
-    } else {
-      // Owner changed their mind — treat new text as updated content, re-confirm
-      await supabase
-        .from('pending_approvals')
-        .update({ final_message: replyText.trim() })
-        .eq('id', approval.id)
-
-      const reconfirmation =
-        `*Nova confirmação de envio* ✅\n\n` +
-        `*Para:* ${lead.name} (+${lead.phone})\n\n` +
-        `*Mensagem que será enviada:*\n` +
-        `─────────────────\n` +
-        `${replyText.trim()}\n` +
-        `─────────────────\n\n` +
-        `Responda *sim* para confirmar e enviar.`
-
-      await sendWhatsAppText(ownerPhone, reconfirmation)
-      console.log(`Owner updated content for ${firstName}. Awaiting re-confirmation.`)
-    }
+  if (!sendResult.ok) {
+    await sendWhatsAppText(ownerPhone, `*Erro ao enviar mensagem para ${lead.name}!*\n\nStatus: ${sendResult.status}\n${sendResult.body}`)
+    console.error(`Failed to send to ${lead.phone}: ${sendResult.status} ${sendResult.body}`)
+    return
   }
+
+  // Mark as sent
+  await supabase
+    .from('sequence_messages')
+    .update({ status: 'sent', sent_at: new Date().toISOString() })
+    .eq('id', approval.sequence_message_id)
+
+  // Clean up approval
+  await supabase.from('pending_approvals').delete().eq('id', approval.id)
+
+  // Notify owner
+  await sendWhatsAppText(ownerPhone, `Mensagem enviada para *${lead.name}* com sucesso! 🚀`)
+  console.log(`Step 0 sent to ${firstName} (${lead.phone}) after owner approval.`)
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -267,12 +220,27 @@ Deno.serve(async (req) => {
 
   console.log('Inbound webhook payload:', JSON.stringify(payload))
 
+  const data = payload?.data as Record<string, unknown> | undefined
   const senderPhone = normalizePhone(
-    String(payload?.sender ?? payload?.from ?? payload?.phone ?? '')
+    String(
+      (data?.sender as Record<string, unknown>)?.phone_number ??
+      payload?.sender ??
+      payload?.from ??
+      payload?.phone ??
+      ''
+    )
   )
+  const content = data?.content as Record<string, unknown> | undefined
   const messageBody = String(
-    payload?.text ?? payload?.body ?? payload?.message ?? ''
+    content?.text ??
+    (content?.reaction as Record<string, unknown>)?.text ??
+    payload?.text ??
+    payload?.body ??
+    payload?.message ??
+    ''
   )
+  const mediaType = String(content?.type ?? '')
+  const mediaUrl = String(content?.url ?? content?.media_url ?? content?.link ?? '')
 
   if (!senderPhone) {
     console.warn('Could not extract sender phone from webhook payload')
@@ -318,35 +286,89 @@ Deno.serve(async (req) => {
     .eq('phone', senderPhone)
     .single()
 
+  if (!lead) {
+    console.log(`Ignoring message from unknown number: ${senderPhone}`)
+    return new Response('OK', { status: 200 })
+  }
+
   await supabase.from('inbound_messages').insert({
-    lead_id: lead?.id ?? null,
+    lead_id: lead.id,
     phone: senderPhone,
     body: messageBody,
   })
 
-  if (lead && lead.status === 'active') {
-    await supabase.from('leads').update({ status: 'replied' }).eq('id', lead.id)
+  const MEDIA_TYPES = ['image', 'audio', 'video', 'document', 'sticker']
+  if (MEDIA_TYPES.includes(mediaType)) {
+    const label = mediaType === 'image' ? 'Imagem' : mediaType === 'audio' ? 'Audio' : mediaType === 'video' ? 'Video' : mediaType === 'document' ? 'Documento' : 'Midia'
+    const mediaNotification =
+      `*${lead.name}* enviou um ${label}:\n` +
+      (mediaUrl ? mediaUrl : '_sem URL disponivel_')
+    await sendWhatsAppText(ownerPhone, mediaNotification)
+    console.log(`Media (${mediaType}) from ${lead.name} forwarded to owner.`)
+    return new Response('OK', { status: 200 })
+  }
 
-    await supabase
-      .from('sequence_messages')
-      .update({ status: 'skipped' })
-      .eq('lead_id', lead.id)
-      .in('status', ['pending', 'awaiting_approval', 'awaiting_confirm'])
+  if (lead.status === 'active' || lead.status === 'replied') {
+    if (lead.status === 'active') {
+      await supabase.from('leads').update({ status: 'replied' }).eq('id', lead.id)
 
-    await supabase
-      .from('pending_approvals')
-      .delete()
+      await supabase
+        .from('sequence_messages')
+        .update({ status: 'skipped' })
+        .eq('lead_id', lead.id)
+        .in('status', ['pending', 'awaiting_approval', 'awaiting_confirm'])
+
+      await supabase
+        .from('pending_approvals')
+        .delete()
+        .eq('lead_id', lead.id)
+    }
+
+    // Check 5-minute window from first reply
+    const { data: firstMessage } = await supabase
+      .from('inbound_messages')
+      .select('created_at')
       .eq('lead_id', lead.id)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .single()
+
+    const firstReplyAt = firstMessage ? new Date(firstMessage.created_at) : new Date()
+    const withinWindow = (new Date().getTime() - firstReplyAt.getTime()) <= 5 * 60 * 1000
+
+    if (!withinWindow) {
+      console.log(`Lead ${extractFirstName(lead.name)} replied but 5-min window expired. Skipping owner notification.`)
+      return new Response('OK', { status: 200 })
+    }
 
     const firstName = extractFirstName(lead.name)
-    const notification =
-      `*Lead respondeu!* 💬\n\n` +
-      `*${lead.name}* (+${senderPhone}):\n\n` +
-      `_"${messageBody}"_\n\n` +
-      `Sequência pausada. Hora de entrar em contato manualmente!`
+
+    let notification: string
+    if (lead.status === 'active') {
+      // First reply: full notification with step info
+      const { data: lastSent } = await supabase
+        .from('sequence_messages')
+        .select('step')
+        .eq('lead_id', lead.id)
+        .eq('status', 'sent')
+        .order('step', { ascending: false })
+        .limit(1)
+        .single()
+
+      const stepLabel = lastSent ? `Passo ${lastSent.step} de 5` : 'Antes do primeiro envio'
+      notification =
+        `*Lead respondeu!* 💬\n\n` +
+        `*${lead.name}* (+${senderPhone})\n` +
+        `*Etapa:* ${stepLabel}\n\n` +
+        `_"${messageBody}"_\n\n` +
+        `Sequencia pausada. Hora de entrar em contato manualmente!`
+    } else {
+      // Subsequent replies: simple format
+      notification = `*${firstName}:* ${messageBody}`
+    }
 
     await sendWhatsAppText(ownerPhone, notification)
-    console.log(`Lead ${firstName} (${senderPhone}) replied. Sequence stopped. Owner notified.`)
+    console.log(`Lead ${firstName} (${senderPhone}) replied. Owner notified.`)
   }
 
   return new Response('OK', { status: 200 })
