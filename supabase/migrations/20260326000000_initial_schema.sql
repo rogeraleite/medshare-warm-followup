@@ -145,7 +145,7 @@ create table inbound_messages (
 --
 -- select cron.schedule(
 --   'process-due-messages',
---   '* * * * *',
+--   'Supabase>choosen_project>Project Settings>API Keys>Legacy anon, service_role API keys> service_role (secret)',
 --   $$
 --     select net.http_post(
 --       url     := 'https://tycselnwkwufcvhpygee.supabase.co/functions/v1/process-due-messages',

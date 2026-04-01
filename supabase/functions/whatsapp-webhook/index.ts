@@ -324,16 +324,28 @@ Deno.serve(async (req) => {
         .eq('lead_id', lead.id)
     }
 
-    // Check 5-minute window from first reply
-    const { data: firstMessage } = await supabase
+    // Check 5-minute window from first reply after last sent step
+    const { data: lastSentMsg } = await supabase
+      .from('sequence_messages')
+      .select('sent_at')
+      .eq('lead_id', lead.id)
+      .eq('status', 'sent')
+      .order('sent_at', { ascending: false })
+      .limit(1)
+      .single()
+
+    const afterSentAt = lastSentMsg?.sent_at ?? new Date(0).toISOString()
+
+    const { data: firstCurrentMessage } = await supabase
       .from('inbound_messages')
       .select('created_at')
       .eq('lead_id', lead.id)
+      .gte('created_at', afterSentAt)
       .order('created_at', { ascending: true })
       .limit(1)
       .single()
 
-    const firstReplyAt = firstMessage ? new Date(firstMessage.created_at) : new Date()
+    const firstReplyAt = firstCurrentMessage ? new Date(firstCurrentMessage.created_at) : new Date()
     const withinWindow = (new Date().getTime() - firstReplyAt.getTime()) <= 5 * 60 * 1000
 
     if (!withinWindow) {

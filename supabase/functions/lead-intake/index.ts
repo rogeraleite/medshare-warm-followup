@@ -119,11 +119,12 @@ Deno.serve(async (req) => {
     return new Response('Failed to schedule step 1', { status: 500, headers: CORS_HEADERS })
   }
 
-  // Steps 2-5: scheduled normally
+  // Steps 2-5: scheduled at 10:00 BRT (13:00 UTC) on the target day
   const followups = SEQUENCE_DELAYS_DAYS.slice(1).map((delayDays, i) => {
-    const scheduledAt = new Date(now)
-    scheduledAt.setDate(scheduledAt.getDate() + delayDays)
-    return { lead_id: lead.id, step: i + 2, scheduled_at: scheduledAt.toISOString(), status: 'pending' }
+    const target = new Date(now)
+    target.setUTCDate(target.getUTCDate() + delayDays)
+    target.setUTCHours(13, 0, 0, 0)
+    return { lead_id: lead.id, step: i + 2, scheduled_at: target.toISOString(), status: 'pending' }
   })
 
   await supabase.from('sequence_messages').insert(followups)
