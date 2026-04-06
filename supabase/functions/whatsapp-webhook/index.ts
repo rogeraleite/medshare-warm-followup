@@ -4,6 +4,144 @@ import { extractFirstName, renderTemplate, type Lead } from '../_shared/template
 const LEAD_TRIGGER_PREFIX = 'Potencial Lead:'
 const SEQUENCE_DELAYS_DAYS = [0, 1, 3, 7, 14]
 
+// ─── Blotato types ────────────────────────────────────────────────────────────
+
+interface PendingPost {
+  urls: string[]
+  caption: string
+  scheduledTime: string
+  titulo: string
+}
+
+interface NotifyPending {
+  postSubmissionId: string
+  scheduledTime: string
+  titulo: string
+}
+
+// ─── Supabase Storage helpers ─────────────────────────────────────────────────
+
+async function readStorageJson<T>(
+  supabase: ReturnType<typeof createClient>,
+  bucket: string,
+  path: string
+): Promise<T | null> {
+  const { data, error } = await supabase.storage.from(bucket).download(path)
+  if (error || !data) return null
+  try {
+    return JSON.parse(await data.text()) as T
+  } catch {
+    return null
+  }
+}
+
+async function writeStorageJson(
+  supabase: ReturnType<typeof createClient>,
+  bucket: string,
+  path: string,
+  payload: unknown
+): Promise<void> {
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+  await supabase.storage.from(bucket).upload(path, blob, { upsert: true })
+}
+
+async function deleteStorageFile(
+  supabase: ReturnType<typeof createClient>,
+  bucket: string,
+  path: string
+): Promise<void> {
+  await supabase.storage.from(bucket).remove([path])
+}
+
+// ─── Blotato ──────────────────────────────────────────────────────────────────
+
+async function schedulePost(pending: PendingPost): Promise<string> {
+  const res = await fetch('https://backend.blotato.com/v2/posts', {
+    method: 'POST',
+    headers: {
+      'blotato-api-key': Deno.env.get('BLOTATO_API_KEY')!,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      post: {
+        accountId: Deno.env.get('BLOTATO_ACCOUNT_ID')!,
+        content: {
+          text: pending.caption,
+          mediaUrls: pending.urls,
+          platform: 'instagram',
+        },
+        target: { targetType: 'instagram' },
+      },
+      scheduledTime: pending.scheduledTime,
+    }),
+  })
+  const json = await res.json()
+  if (!res.ok) throw new Error(`Blotato error: ${JSON.stringify(json)}`)
+  return json.postSubmissionId as string
+}
+
+async function getPostStatus(postSubmissionId: string): Promise<{ status: string; publicUrl?: string }> {
+  const res = await fetch(`https://backend.blotato.com/v2/posts/${postSubmissionId}`, {
+    headers: { 'blotato-api-key': Deno.env.get('BLOTATO_API_KEY')! },
+  })
+  return res.json()
+}
+
+// ─── WhatsApp image sender ────────────────────────────────────────────────────
+
+async function sendWhatsAppImage(phone: string, imageUrl: string, caption: string): Promise<void> {
+  const url = `${Deno.env.get('ZAPSTER_API_URL')}/wa/messages`
+  await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${Deno.env.get('ZAPSTER_TOKEN')}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      recipient: phone,
+      instance_id: Deno.env.get('ZAPSTER_INSTANCE_ID'),
+      media: { url: imageUrl, caption },
+    }),
+  })
+}
+
+// ─── Post approval handler ────────────────────────────────────────────────────
+
+async function handlePostApproval(
+  supabase: ReturnType<typeof createClient>,
+  pending: PendingPost,
+  ownerPhone: string
+): Promise<void> {
+  // Schedule on Blotato
+  const postSubmissionId = await schedulePost(pending)
+
+  // Store notify-pending so check-post-published can fire later
+  const notify: NotifyPending = {
+    postSubmissionId,
+    scheduledTime: pending.scheduledTime,
+    titulo: pending.titulo,
+  }
+  await writeStorageJson(supabase, 'medshare-posts', 'notify-pending.json', notify)
+
+  // Clean up approval file
+  await deleteStorageFile(supabase, 'medshare-posts', 'pending.json')
+
+  // Format scheduled time in BRT (UTC-3)
+  const scheduledDate = new Date(new Date(pending.scheduledTime).getTime() - 3 * 60 * 60 * 1000)
+  const formattedDate = scheduledDate.toLocaleDateString('pt-BR', {
+    weekday: 'long', day: '2-digit', month: '2-digit', timeZone: 'America/Sao_Paulo',
+  })
+  const formattedTime = scheduledDate.toLocaleTimeString('pt-BR', {
+    hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo',
+  })
+
+  await sendWhatsAppText(ownerPhone,
+    `Agendado! ✅\n\n*${pending.titulo}*\n📅 ${formattedDate} às ${formattedTime}`
+  )
+
+  console.log(`Post "${pending.titulo}" scheduled. submissionId=${postSubmissionId}`)
+}
+
 // ─── Phone helpers ────────────────────────────────────────────────────────────
 
 function normalizePhone(raw: string): string {
@@ -260,15 +398,37 @@ Deno.serve(async (req) => {
 
   const ownerPhone = normalizePhone(Deno.env.get('OWNER_PHONE') ?? '')
 
-  // ── Message from owner: handle approval flow ──
+  // ── Message from owner ──
   if (senderPhone === ownerPhone) {
     if (messageBody.startsWith(LEAD_TRIGGER_PREFIX)) {
-      // Owner can also register a lead manually
       const csv = messageBody.slice(LEAD_TRIGGER_PREFIX.length).trim()
       await registerLead(supabase, csv)
-    } else {
-      await handleOwnerReply(supabase, messageBody)
+      return new Response('OK', { status: 200 })
     }
+
+    // Check for weekly posts commands: confirmar A B C, refazer B, descartar tudo, etc.
+    const normalizedReply = messageBody.trim().toLowerCase()
+    const isWeeklyCommand =
+      normalizedReply.startsWith('confirmar') ||
+      normalizedReply.startsWith('refazer') ||
+      normalizedReply === 'descartar tudo'
+
+    if (isWeeklyCommand) {
+      // Forward to aprovar-posts function
+      const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+      await fetch(`${supabaseUrl}/functions/v1/aprovar-posts`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ command: messageBody.trim() }),
+      })
+      return new Response('OK', { status: 200 })
+    }
+
+    // No pending post — fall through to lead approval flow
+    await handleOwnerReply(supabase, messageBody)
     return new Response('OK', { status: 200 })
   }
 
@@ -322,35 +482,6 @@ Deno.serve(async (req) => {
         .from('pending_approvals')
         .delete()
         .eq('lead_id', lead.id)
-    }
-
-    // Check 5-minute window from first reply after last sent step
-    const { data: lastSentMsg } = await supabase
-      .from('sequence_messages')
-      .select('sent_at')
-      .eq('lead_id', lead.id)
-      .eq('status', 'sent')
-      .order('sent_at', { ascending: false })
-      .limit(1)
-      .single()
-
-    const afterSentAt = lastSentMsg?.sent_at ?? new Date(0).toISOString()
-
-    const { data: firstCurrentMessage } = await supabase
-      .from('inbound_messages')
-      .select('created_at')
-      .eq('lead_id', lead.id)
-      .gte('created_at', afterSentAt)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .single()
-
-    const firstReplyAt = firstCurrentMessage ? new Date(firstCurrentMessage.created_at) : new Date()
-    const withinWindow = (new Date().getTime() - firstReplyAt.getTime()) <= 5 * 60 * 1000
-
-    if (!withinWindow) {
-      console.log(`Lead ${extractFirstName(lead.name)} replied but 5-min window expired. Skipping owner notification.`)
-      return new Response('OK', { status: 200 })
     }
 
     const firstName = extractFirstName(lead.name)
