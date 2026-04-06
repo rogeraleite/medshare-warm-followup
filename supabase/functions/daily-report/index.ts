@@ -59,13 +59,16 @@ Deno.serve(async (req) => {
   }
 
   const today = new Date()
-  const todayStr = today.toLocaleDateString('pt-BR', { timeZone: 'Europe/Paris' })
+  const todayStr = today.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+
+  const toDateStr = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
 
   const lines: string[] = []
   for (const [name, info] of leadMap) {
     const scheduledDate = new Date(info.scheduled_at)
-    const diffMs = scheduledDate.getTime() - today.getTime()
-    const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
+    const todayDateStr = toDateStr(today)
+    const scheduledDateStr = toDateStr(scheduledDate)
+    const diffDays = (new Date(scheduledDateStr).getTime() - new Date(todayDateStr).getTime()) / (1000 * 60 * 60 * 24)
 
     let when: string
     if (info.status === 'awaiting_approval') {
