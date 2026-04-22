@@ -97,7 +97,7 @@ Set via `supabase secrets set`:
 | `MEDSHARE_SENDER_PHONE` | MedShare WhatsApp number (outbound echo ignored) |
 | `OWNER_PHONE`           | Owner personal number (receives all alerts)      |
 
-Copy `.env.local` to configure locally. Never commit this file.
+Copy `.env.example` to `.env` to configure locally. Never commit this file.
 
 ## Setup
 
