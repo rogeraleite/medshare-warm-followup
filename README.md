@@ -1,114 +1,121 @@
 # MedShare WhatsApp Lead Follow-up
 
-Automated WhatsApp drip sequence for MedShare leads. When a potential lead is captured (via landing page or manually), the system sends personalized follow-up messages at scheduled intervals and stops as soon as the lead replies.
+Automacao de follow-up por WhatsApp para leads quentes da MedShare. O sistema registra o lead, pede aprovacao humana da primeira mensagem, continua a sequencia automaticamente e interrompe tudo assim que houver resposta.
 
-## How it works
+## Navegacao Rapida
 
-1. A lead is registered by sending a WhatsApp message to the MedShare number with the prefix `Potencial Lead:` followed by CSV data.
-2. The owner receives a notification on their personal WhatsApp with lead details and a suggested first message.
-3. The owner approves (or rewrites) the message via a 2-step confirmation flow.
-4. Once approved, the message is sent to the lead. Follow-up messages are sent automatically at +1d, +3d, +7d, and +14d.
-5. If the lead replies at any point, the sequence stops and the owner is notified.
+- Se voce quer mexer no **schema e templates default**, comece em `supabase/migrations/20260326000000_initial_schema.sql`
+- Se voce quer mexer no **webhook de entrada**, olhe `supabase/functions/whatsapp-webhook/`
+- Se voce quer mexer no **processamento agendado das mensagens**, olhe `supabase/functions/process-due-messages/`
+- Se voce quer mexer na **entrada HTTP direta de leads**, olhe `supabase/functions/lead-intake/`
+- Se voce quer entender o **contexto do produto**, leia `medshare-product.md`
+- Se voce quer setup operacional detalhado, complemente com `SETUP.md`
 
-## Message sequence
+## Como Funciona
 
-| Step | Delay | Type       | Description                     |
-|------|-------|------------|---------------------------------|
-| 0    | immed | text       | First contact (owner-approved)  |
-| 1    | +1d   | text       | Reminder                        |
-| 2    | +3d   | video link | Demo video                      |
-| 3    | +7d   | text       | Pain-point personalization      |
-| 4    | +14d  | text       | Last contact                    |
+1. Um lead entra com o prefixo `Potencial Lead:`
+2. O sistema registra o lead e notifica o owner no WhatsApp pessoal
+3. O owner aprova a mensagem sugerida ou reescreve
+4. A primeira mensagem e enviada
+5. Follow-ups automaticos saem em janelas predefinidas
+6. Se o lead responder, a sequencia para e o owner e avisado
 
-## Lead registration format
+## Sequencia De Mensagens
 
-Send to the MedShare WhatsApp number:
+| Step | Delay | Tipo | Objetivo |
+|------|-------|------|----------|
+| 0 | immed | text | primeiro contato aprovado pelo owner |
+| 1 | +1d | text | lembrete |
+| 2 | +3d | video link | demo |
+| 3 | +7d | text | personalizacao pela dor |
+| 4 | +14d | text | ultima tentativa |
 
+## Mapa Do Projeto
+
+- `supabase/migrations/20260326000000_initial_schema.sql`
+  schema principal e templates iniciais
+- `supabase/functions/whatsapp-webhook/`
+  lida com mensagens recebidas do Zapster
+- `supabase/functions/process-due-messages/`
+  cron que dispara mensagens pendentes
+- `supabase/functions/lead-intake/`
+  endpoint opcional para registrar leads por HTTP
+- `supabase/functions/_shared/templates.ts`
+  placeholders e renderizacao de templates
+- `SETUP.md`
+  guia complementar de operacao
+- `medshare-product.md`
+  contexto de produto para copy e ajustes
+
+## Se Voce Quer Alterar X, Va Para Y
+
+- **Mensagem sugerida, placeholders e copy base**
+  migration inicial e `_shared/templates.ts`
+- **Fluxo de aprovacao do owner**
+  `supabase/functions/whatsapp-webhook/`
+- **Regra de envio por tempo**
+  `supabase/functions/process-due-messages/`
+- **Forma de registrar leads**
+  `supabase/functions/lead-intake/` e `whatsapp-webhook/`
+- **Segredos e configuracao externa**
+  `.env.example`, `supabase secrets`, e `SETUP.md`
+
+## Arquitetura
+
+```text
+FlutterFlow ou cadastro manual
+    ->
+WhatsApp MedShare via Zapster
+    ->
+whatsapp-webhook
+    -> registra lead
+    -> conduz aprovacao do owner
+    -> detecta resposta do lead e interrompe a cadencia
+
+pg_cron
+    ->
+process-due-messages
+    -> envia mensagens pendentes
 ```
+
+## Formato De Registro De Lead
+
+```text
 Potencial Lead: Nome Completo, 51999998888, Cargo, Volume de procedimentos, Descricao dos problemas
 ```
 
-- Phone: Brazilian numbers only need DDD + number (country code `55` is added automatically). International numbers should include country code with `+`.
-- Problems field may contain commas.
+- Numeros brasileiros podem ir com DDD + numero
+- Numeros internacionais devem incluir `+`
+- O campo de problemas pode conter virgulas
 
-## Owner approval flow
+## Variaveis E Integracoes
 
-When a new lead is registered:
+Stack principal:
+- `Supabase`
+- `Zapster API`
+- `FlutterFlow`
 
-1. Owner receives a notification with lead details and a suggested message.
-2. Owner replies `sim` to use the suggested message, or types a custom message.
-3. Owner receives a confirmation showing exactly what will be sent.
-4. Owner replies `sim` to confirm and send. Any other reply updates the message content and requests re-confirmation.
+Segredos relevantes:
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `ZAPSTER_API_URL`
+- `ZAPSTER_TOKEN`
+- `ZAPSTER_INSTANCE_ID`
+- `MEDSHARE_SENDER_PHONE`
+- `OWNER_PHONE`
 
-## Architecture
-
-```
-FlutterFlow (lead form)
-    |
-    v
-MedShare WhatsApp number (Zapster instance)
-    |
-    v
-whatsapp-webhook (Supabase Edge Function)
-    |-- "Potencial Lead:" --> registerLead() --> DB + owner notification
-    |-- Owner reply ------> handleOwnerReply() --> approval flow
-    `-- Lead reply -------> mark replied, stop sequence, notify owner
-
-process-due-messages (Supabase Edge Function)
-    ^
-    |
-pg_cron (every minute) --> sends pending sequence messages
-```
-
-## Stack
-
-- **Supabase** (free tier): PostgreSQL, Edge Functions (Deno), pg_cron, pg_net
-- **Zapster API**: WhatsApp sending/receiving
-- **FlutterFlow**: Lead capture form (sends trigger message)
-
-## Project structure
-
-```
-supabase/
-  migrations/
-    20260326000000_initial_schema.sql   # DB schema + default templates
-  functions/
-    _shared/
-      templates.ts                      # Lead type, template rendering
-    whatsapp-webhook/
-      index.ts                          # Inbound webhook handler
-    process-due-messages/
-      index.ts                          # Cron-triggered message sender
-    lead-intake/
-      index.ts                          # Direct HTTP lead registration (optional)
-```
-
-## Environment variables
-
-Set via `supabase secrets set`:
-
-| Variable                | Description                                      |
-|-------------------------|--------------------------------------------------|
-| `SUPABASE_URL`          | Supabase project URL                             |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role key (bypasses RLS)             |
-| `ZAPSTER_API_URL`       | `https://new-api.zapsterapi.com/v1`              |
-| `ZAPSTER_TOKEN`         | Zapster JWT token                                |
-| `ZAPSTER_INSTANCE_ID`   | Zapster WhatsApp instance ID                     |
-| `MEDSHARE_SENDER_PHONE` | MedShare WhatsApp number (outbound echo ignored) |
-| `OWNER_PHONE`           | Owner personal number (receives all alerts)      |
-
-Copy `.env.example` to `.env` to configure locally. Never commit this file.
+Copie `.env.example` para `.env` no ambiente local.
 
 ## Setup
 
-### 1. Deploy database
+### 1. Banco
 
 ```bash
 supabase link --project-ref <project-ref>
 supabase db push
 ```
 
-### 2. Set secrets
+### 2. Secrets
 
 ```bash
 supabase secrets set \
@@ -119,53 +126,31 @@ supabase secrets set \
   OWNER_PHONE=<number>
 ```
 
-### 3. Deploy Edge Functions
+### 3. Functions
 
 ```bash
 supabase functions deploy whatsapp-webhook --no-verify-jwt
 supabase functions deploy process-due-messages
 ```
 
-### 4. Configure pg_cron
+### 4. Cron
 
-Run in Supabase SQL Editor (see comment at the bottom of the migration file):
+Configure `pg_cron` para chamar `process-due-messages` a cada minuto.
 
-```sql
-select cron.schedule(
-  'process-due-messages',
-  '* * * * *',
-  $$
-    select net.http_post(
-      url     := 'https://<project-ref>.supabase.co/functions/v1/process-due-messages',
-      headers := jsonb_build_object(
-        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
-        'Content-Type', 'application/json'
-      ),
-      body    := '{}'::jsonb
-    );
-  $$
-);
-```
+### 5. Webhook Zapster
 
-### 5. Register webhook in Zapster
+Use:
 
-Set the webhook URL to:
-
-```
+```text
 https://<project-ref>.supabase.co/functions/v1/whatsapp-webhook
 ```
 
-Event: **Mensagem Recebida**
+Evento: `Mensagem Recebida`
 
-## Message templates
+## Templates
 
-Templates are stored in the `message_templates` table and support these placeholders:
-
-| Placeholder        | Value                           |
-|--------------------|---------------------------------|
-| `{{first_name}}`   | Lead's first name               |
-| `{{role}}`         | Mapped role label               |
-| `{{procedures}}`   | procedures_per_month field      |
-| `{{problems}}`     | problems field                  |
-
-To update templates, edit the rows directly in Supabase Table Editor or via SQL.
+Placeholders suportados em `message_templates`:
+- `{{first_name}}`
+- `{{role}}`
+- `{{procedures}}`
+- `{{problems}}`
