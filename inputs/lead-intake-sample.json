@@ -1,0 +1,54 @@
+{
+  "_comment": "Exemplo de payload de entrada para registrar lead. Ref: shared_contracts/lead.json",
+  "_format_whatsapp": "Potencial Lead: Nome Completo, 51999998888, Cargo, Volume de procedimentos, Descricao dos problemas",
+  "examples": [
+    {
+      "raw_whatsapp_message": "Potencial Lead: Dr. Carlos Mendes, 51988776655, Anestesista Freelancer, 15 procedimentos/semana, Nao sabe quanto cobrar por procedimentos longos e perde dinheiro no calculo de PACU",
+      "parsed": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "status": "new",
+        "type": "anestesista-frila",
+        "channel": "whatsapp",
+        "created_at": "2026-04-26T10:30:00Z",
+        "profile": {
+          "name": "Dr. Carlos Mendes",
+          "phone": "51988776655",
+          "specialty": "Anestesiologia",
+          "group_size": 1
+        },
+        "journey": {
+          "first_touch": "whatsapp-direto",
+          "followup_step": 0,
+          "notes": [
+            "15 procedimentos/semana",
+            "dor: calculo de honorario PACU"
+          ]
+        }
+      }
+    },
+    {
+      "raw_whatsapp_message": "Potencial Lead: Dra. Fernanda Costa, +5511977889900, Coordenadora grupo anestesia, 8 anestesistas, Dificuldade de dividir honorarios entre o grupo e gerar relatorios mensais",
+      "parsed": {
+        "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "status": "new",
+        "type": "grupo-anestesia",
+        "channel": "whatsapp",
+        "created_at": "2026-04-26T11:00:00Z",
+        "profile": {
+          "name": "Dra. Fernanda Costa",
+          "phone": "+5511977889900",
+          "specialty": "Anestesiologia",
+          "group_size": 8
+        },
+        "journey": {
+          "first_touch": "whatsapp-direto",
+          "followup_step": 0,
+          "notes": [
+            "grupo com 8 anestesistas",
+            "dor: divisao de honorarios e relatorios"
+          ]
+        }
+      }
+    }
+  ]
+}

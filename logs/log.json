@@ -1,0 +1,19 @@
+{
+  "project": "medshare-warm-followup",
+  "_schema": {
+    "action_deploy": {
+      "timestamp": "ISO-8601",
+      "action": "deploy | function_update | config_change",
+      "status": "success | failed",
+      "details": "descrição curta"
+    }
+  },
+  "logs": [
+    {
+      "timestamp": "2026-04-26T00:00:00Z",
+      "action": "scaffold_operational_folders",
+      "status": "success",
+      "details": "Pastas inputs/ outputs/ logs/ prompts/ criadas pelo orchestrator"
+    }
+  ]
+}

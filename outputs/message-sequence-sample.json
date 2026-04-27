@@ -1,0 +1,42 @@
+{
+  "_comment": "Exemplo de sequencia de mensagens gerada para um lead. Ref: supabase/migrations schema.",
+  "lead_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "lead_name": "Dr. Carlos Mendes",
+  "sequence": [
+    {
+      "step": 0,
+      "type": "text",
+      "delay": "imediato apos aprovacao do owner",
+      "status": "pending_approval",
+      "content": "Oi Dr. Carlos, tudo bem?\n\nVi que voce tem uma rotina pesada de anestesia freelancer com bastante procedimentos por semana. Queria entender como voce calcula o honorario hoje, especialmente nos casos de PACU mais longo.\n\nPosso mostrar como o MedShare faz esse calculo automaticamente. Faz sentido conversarmos?"
+    },
+    {
+      "step": 1,
+      "type": "text",
+      "delay": "+1 dia",
+      "status": "scheduled",
+      "content": "Dr. Carlos, so passando para ver se minha mensagem chegou.\n\nSe preferir, posso te mandar um video curto mostrando como o calculo de honorario funciona na pratica. E rapido."
+    },
+    {
+      "step": 2,
+      "type": "video_link",
+      "delay": "+3 dias",
+      "status": "scheduled",
+      "content": "Dr. Carlos, gravei um video de 3 minutos mostrando como o MedShare calcula honorario justo para anestesistas freelancers.\n\n[link do video]\n\nAcho que vai fazer sentido para sua realidade."
+    },
+    {
+      "step": 3,
+      "type": "text",
+      "delay": "+7 dias",
+      "status": "scheduled",
+      "content": "Dr. Carlos, uma ultima coisa que achei relevante para o seu caso especifico:\n\nAnestesistas que tem muitos procedimentos longos normalmente perdem entre 15% e 30% da receita por nao contabilizar direito o tempo de PACU.\n\nO MedShare resolve isso automaticamente. Quer ver como?"
+    },
+    {
+      "step": 4,
+      "type": "text",
+      "delay": "+14 dias",
+      "status": "scheduled",
+      "content": "Dr. Carlos, vou deixar a porta aberta.\n\nSe em algum momento quiser entender melhor como o MedShare funciona, e so me chamar. Sem pressao."
+    }
+  ]
+}
