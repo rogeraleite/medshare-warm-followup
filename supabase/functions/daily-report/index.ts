@@ -43,10 +43,10 @@ Deno.serve(async (req) => {
     return new Response('DB error', { status: 500 })
   }
 
+  // Sem lead pendente: nao envia nada no WhatsApp (relatorio silencioso).
   if (!rows || rows.length === 0) {
-    const ownerPhone = Deno.env.get('OWNER_PHONE')!
-    await sendWhatsAppText(ownerPhone, `*Relatorio diario MedShare* 📊\n\nNenhum lead com followup pendente hoje.`)
-    return new Response(JSON.stringify({ leads: 0 }), { headers: { 'Content-Type': 'application/json' } })
+    console.log('Nenhum lead com followup pendente. Relatorio nao enviado.')
+    return new Response(JSON.stringify({ leads: 0, sent: false }), { headers: { 'Content-Type': 'application/json' } })
   }
 
   // Group by lead name, keep only the next step per lead
@@ -56,6 +56,11 @@ Deno.serve(async (req) => {
     if (!leadMap.has(lead.name)) {
       leadMap.set(lead.name, { step: row.step, scheduled_at: row.scheduled_at, status: row.status })
     }
+  }
+
+  if (leadMap.size === 0) {
+    console.log('Nenhum lead com followup pendente. Relatorio nao enviado.')
+    return new Response(JSON.stringify({ leads: 0, sent: false }), { headers: { 'Content-Type': 'application/json' } })
   }
 
   const today = new Date()
@@ -93,5 +98,5 @@ Deno.serve(async (req) => {
   await sendWhatsAppText(ownerPhone, report)
   console.log(`Daily report sent with ${leadMap.size} leads.`)
 
-  return new Response(JSON.stringify({ leads: leadMap.size }), { headers: { 'Content-Type': 'application/json' } })
+  return new Response(JSON.stringify({ leads: leadMap.size, sent: true }), { headers: { 'Content-Type': 'application/json' } })
 })
