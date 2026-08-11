@@ -6,6 +6,7 @@ Automacao de follow-up por WhatsApp para leads quentes da MedShare. O sistema re
 
 - Se voce quer mexer no **schema e templates default**, comece em `supabase/migrations/20260326000000_initial_schema.sql`
 - Se voce quer mexer no **webhook de entrada**, olhe `supabase/functions/whatsapp-webhook/`
+- Se você quer mexer nas **escolhas editoriais do blog**, olhe `supabase/functions/_shared/blog-editorial.ts` e a tabela `blog_editorial_cycles`
 - Se voce quer mexer no **processamento agendado das mensagens**, olhe `supabase/functions/process-due-messages/`
 - Se voce quer mexer na **entrada HTTP direta de leads**, olhe `supabase/functions/lead-intake/`
 - Se voce quer entender o **contexto do produto**, leia `medshare-product.md`
@@ -19,6 +20,8 @@ Automacao de follow-up por WhatsApp para leads quentes da MedShare. O sistema re
 4. A primeira mensagem e enviada
 5. Follow-ups automaticos saem em janelas predefinidas
 6. Se o lead responder, a sequencia para e o owner e avisado
+
+O mesmo webhook também recebe comandos editoriais isolados para o MedShare Blog. Somente o número configurado em `OWNER_PHONE` pode usar `BLOG A`, `BLOG B`, `BLOG C` ou `BLOG D`. Esses comandos são associados ao ciclo semanal pendente e nunca são encaminhados ao fluxo de aprovação de leads.
 
 ## Sequencia De Mensagens
 
@@ -42,6 +45,10 @@ Automacao de follow-up por WhatsApp para leads quentes da MedShare. O sistema re
   endpoint opcional para registrar leads por HTTP
 - `supabase/functions/_shared/templates.ts`
   placeholders e renderizacao de templates
+- `supabase/functions/_shared/blog-editorial.ts`
+  parser e confirmação dos comandos editoriais do blog
+- `supabase/migrations/20260811000000_blog_editorial_cycles.sql`
+  estado semanal, prazo, escolha e artigos confirmados do blog
 - `SETUP.md`
   guia complementar de operacao
 - `medshare-product.md`
@@ -57,6 +64,8 @@ Automacao de follow-up por WhatsApp para leads quentes da MedShare. O sistema re
   `supabase/functions/process-due-messages/`
 - **Forma de registrar leads**
   `supabase/functions/lead-intake/` e `whatsapp-webhook/`
+- **Escolha A, B, C ou D para o blog**
+  `whatsapp-webhook/`, `_shared/blog-editorial.ts` e `blog_editorial_cycles`
 - **Segredos e configuracao externa**
   `.env.example`, `supabase secrets`, e `SETUP.md`
 
@@ -71,6 +80,7 @@ whatsapp-webhook
     -> registra lead
     -> conduz aprovacao do owner
     -> detecta resposta do lead e interrompe a cadencia
+    -> reconhece o namespace BLOG e grava a direção editorial
 
 pg_cron
     ->
@@ -146,6 +156,15 @@ https://<project-ref>.supabase.co/functions/v1/whatsapp-webhook
 ```
 
 Evento: `Mensagem Recebida`
+
+### Comandos editoriais do blog
+
+- `BLOG A`
+- `BLOG B`
+- `BLOG C`
+- `BLOG D`
+
+Antes do prazo de segunda-feira às 12h BRT, uma nova resposta substitui a escolha anterior. Depois que o ciclo é bloqueado, a direção não muda. Mensagens como `A`, `confirmar A` ou `BLOG A agora` não são tratadas como escolha do blog.
 
 ## Templates
 

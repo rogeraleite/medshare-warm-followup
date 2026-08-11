@@ -53,7 +53,23 @@ pg_cron (a cada minuto)
 4. Verificar logs: supabase functions logs
 ```
 
+## Workflow 5: Escolha Editorial do MedShare Blog
+
+```
+1. A landing publica os artigos de segunda e quinta
+2. Na quinta, cria no Supabase as opções A, B, C e D da semana seguinte
+3. O owner recebe um resumo único no WhatsApp
+4. O owner responde BLOG A, BLOG B, BLOG C ou BLOG D
+5. whatsapp-webhook valida remetente e namespace
+6. select_blog_editorial_option grava a escolha no ciclo pendente
+7. Na segunda às 12h BRT, a landing bloqueia a escolha
+8. Sem resposta, lock_blog_editorial_cycle aplica D como padrão
+```
+
+O comando `BLOG` é consumido antes dos fluxos genéricos do owner. Mesmo inválido ou expirado, ele não pode cair na aprovação de leads nem nos comandos do Instagram.
+
 ## Dependencias Cross-Projeto
 
 - Leads podem originar de `medshare-landingpage` (formulario de conversao)
+- A direção editorial do blog é compartilhada pela tabela `blog_editorial_cycles`
 - Contexto de argumentos: `../../shared_context/SALES_ARGUMENTS.md`

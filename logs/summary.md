@@ -1,11 +1,12 @@
 # Log Summary — MedShare Warm Followup
 
-Atualizado em: 2026-04-26
+Atualizado em: 2026-08-11
 
 ## Ultimas acoes
 
 | Data | Acao | Status |
 |------|------|--------|
+| 2026-08-11 | add_blog_editorial_command_router | success |
 | 2026-04-26 | scaffold_operational_folders | success |
 
 ## Acoes esperadas neste projeto

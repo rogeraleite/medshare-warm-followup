@@ -1,8 +1,17 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { extractFirstName, renderTemplate, type Lead } from '../_shared/templates.ts'
+import {
+  CLOSED_BLOG_CYCLE_MESSAGE,
+  formatBlogChoiceConfirmation,
+  INVALID_BLOG_COMMAND_MESSAGE,
+  parseBlogEditorialCommand,
+  type BlogEditorialCycleChoice,
+  type ParsedBlogEditorialCommand,
+} from '../_shared/blog-editorial.ts'
 
 const LEAD_TRIGGER_PREFIX = 'Potencial Lead:'
 const SEQUENCE_DELAYS_DAYS = [0, 1, 3, 7, 14]
+type SupabaseClient = ReturnType<typeof createClient<any, 'public'>>
 
 // ─── Blotato types ────────────────────────────────────────────────────────────
 
@@ -22,7 +31,7 @@ interface NotifyPending {
 // ─── Supabase Storage helpers ─────────────────────────────────────────────────
 
 async function readStorageJson<T>(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   bucket: string,
   path: string
 ): Promise<T | null> {
@@ -36,7 +45,7 @@ async function readStorageJson<T>(
 }
 
 async function writeStorageJson(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   bucket: string,
   path: string,
   payload: unknown
@@ -46,7 +55,7 @@ async function writeStorageJson(
 }
 
 async function deleteStorageFile(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   bucket: string,
   path: string
 ): Promise<void> {
@@ -108,7 +117,7 @@ async function sendWhatsAppImage(phone: string, imageUrl: string, caption: strin
 // ─── Post approval handler ────────────────────────────────────────────────────
 
 async function handlePostApproval(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   pending: PendingPost,
   ownerPhone: string
 ): Promise<void> {
@@ -195,7 +204,7 @@ function parseLeadCsv(csv: string): Record<string, string> {
 // ─── Lead registration ────────────────────────────────────────────────────────
 
 async function registerLead(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   csv: string
 ): Promise<void> {
   const { name, phone, role, procedures_per_month, problems } = parseLeadCsv(csv)
@@ -287,7 +296,7 @@ async function registerLead(
 // ─── Owner approval flow ──────────────────────────────────────────────────────
 
 async function handleOwnerReply(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   replyText: string
 ): Promise<void> {
   const ownerPhone = Deno.env.get('OWNER_PHONE')!
@@ -311,7 +320,11 @@ async function handleOwnerReply(
 
   if (!seqMsg || seqMsg.status !== 'awaiting_approval') return
 
-  const lead = approval.leads as { name: string; phone: string }
+  const relatedLeads = approval.leads as unknown
+  const lead = (Array.isArray(relatedLeads) ? relatedLeads[0] : relatedLeads) as
+    | { name: string; phone: string }
+    | undefined
+  if (!lead) return
   const firstName = extractFirstName(lead.name)
 
   // "sim" uses suggested message, anything else is sent as-is
@@ -340,6 +353,43 @@ async function handleOwnerReply(
   // Notify owner
   await sendWhatsAppText(ownerPhone, `Mensagem enviada para *${lead.name}* com sucesso! 🚀`)
   console.log(`Step 0 sent to ${firstName} (${lead.phone}) after owner approval.`)
+}
+
+// ─── Blog editorial choice ──────────────────────────────────────────────────
+
+async function handleBlogEditorialCommand(
+  supabase: SupabaseClient,
+  command: ParsedBlogEditorialCommand,
+  ownerPhone: string
+): Promise<void> {
+  if (command.kind === 'invalid') {
+    await sendWhatsAppText(ownerPhone, INVALID_BLOG_COMMAND_MESSAGE)
+    return
+  }
+
+  if (command.kind !== 'valid') return
+
+  const { data, error } = await supabase.rpc('select_blog_editorial_option', {
+    p_option: command.option,
+  })
+
+  if (error) {
+    console.error('Error selecting blog editorial option:', error.message)
+    await sendWhatsAppText(
+      ownerPhone,
+      'Não foi possível registrar a direção do blog agora. Tente novamente em alguns minutos.'
+    )
+    return
+  }
+
+  const cycle = (Array.isArray(data) ? data[0] : data) as BlogEditorialCycleChoice | undefined
+  if (!cycle) {
+    await sendWhatsAppText(ownerPhone, CLOSED_BLOG_CYCLE_MESSAGE)
+    return
+  }
+
+  await sendWhatsAppText(ownerPhone, formatBlogChoiceConfirmation(cycle))
+  console.log(`Blog editorial option ${cycle.selected_option} selected for week ${cycle.week_start}.`)
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -403,6 +453,14 @@ Deno.serve(async (req) => {
     if (messageBody.startsWith(LEAD_TRIGGER_PREFIX)) {
       const csv = messageBody.slice(LEAD_TRIGGER_PREFIX.length).trim()
       await registerLead(supabase, csv)
+      return new Response('OK', { status: 200 })
+    }
+
+    // BLOG is an explicit namespace. Once recognized, never fall through to
+    // lead approvals or Instagram commands, even when invalid or expired.
+    const blogCommand = parseBlogEditorialCommand(messageBody)
+    if (blogCommand.kind !== 'not_blog') {
+      await handleBlogEditorialCommand(supabase, blogCommand, ownerPhone)
       return new Response('OK', { status: 200 })
     }
 
